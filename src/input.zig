@@ -8,21 +8,34 @@ const x11 = @cImport({
 pub const Input = struct {
     _backend: InputBackend,
 
-    pub fn init() !Input {
+    pub fn init(allocator: std.mem.Allocator) !Input {
         if (std.posix.getenv("DISPLAY") != null)
-            return .{ ._backend = .{ .x11 = try X11Input.init() } }
+            return .{ ._backend = .{ .x11 = try X11Input.init(allocator) } }
         else
-            return .{ ._backend = .{ .std = StdInput.init() } };
+            return .{ ._backend = .{ .std = StdInput.init(allocator) } };
     }
 
     pub fn deinit(self: *Input) !void {
         switch (self._backend) {
             .x11 => |*be| try be.deinit(),
-            else => {},
+            .std => |*be| be.deinit(),
         }
     }
 
-    pub fn nextEvent(self: *Input) ?KeyEvent {
+    pub fn contains(self: *Input, key: *const KeyInput) bool {
+        switch (self._backend) {
+            .x11 => |*be| {
+                return be.contains(key) catch |err|
+                    @panic(@errorName(err));
+            },
+            .std => |*be| {
+                return be.contains(key) catch |err|
+                    @panic(@errorName(err));
+            },
+        }
+    }
+
+    pub fn nextEvent(self: *Input) ?KeyInput {
         switch (self._backend) {
             .x11 => |*be| {
                 return be.nextEvent() catch |err|
@@ -39,11 +52,6 @@ pub const Input = struct {
 const InputBackend = union(enum) {
     x11: X11Input,
     std: StdInput,
-};
-
-pub const KeyEvent = union(enum) {
-    press: KeyInput,
-    release: KeyInput,
 };
 
 pub const KeyInput = struct {
@@ -130,8 +138,9 @@ pub const Key = enum {
 
 const X11Input = struct {
     _display: *x11.Display,
+    _key_state: std.AutoHashMap(KeyInput, bool),
 
-    pub fn init() !X11Input {
+    pub fn init(allocator: std.mem.Allocator) !X11Input {
         const dpy = x11.XOpenDisplay(null) orelse return error.X11Error;
         var focused: x11.Window = undefined;
         var revert: i32 = undefined;
@@ -139,26 +148,34 @@ const X11Input = struct {
         _ = x11.XSelectInput(dpy, focused, x11.KeyPressMask | x11.KeyReleaseMask | x11.FocusChangeMask);
         _ = x11.XAutoRepeatOff(dpy);
         _ = x11.XSynchronize(dpy, 1);
-        return .{ ._display = dpy };
+        return .{ ._display = dpy, ._key_state = std.AutoHashMap(KeyInput, bool).init(allocator) };
     }
 
-    pub fn nextEvent(self: *X11Input) !?KeyEvent {
+    pub fn contains(self: *X11Input, key: *const KeyInput) !bool {
+        _ = try self.nextEvent();
+        if (self._key_state.get(key.*)) |k| {
+            return k;
+        }
+        return false;
+    }
+
+    pub fn nextEvent(self: *X11Input) !?KeyInput {
         if (x11.XPending(self._display) > 0) {
             var event: x11.XEvent = undefined;
             _ = x11.XNextEvent(self._display, &event);
-            var focused: x11.Window = undefined;
-            var revert: i32 = undefined;
-            _ = x11.XGetInputFocus(self._display, &focused, &revert);
             switch (event.type) {
                 x11.KeyPress => {
                     var keysym: x11.KeySym = undefined;
                     _ = x11.XLookupString(&event.xkey, null, 0, &keysym, null);
-                    return .{ .press = .{ .key = toKey(keysym), .mod = toMod(event.xkey.state) } };
+                    const key = KeyInput{ .key = toKey(keysym), .mod = toMod(event.xkey.state) };
+                    try self._key_state.put(key, true);
+                    return key;
                 },
                 x11.KeyRelease => {
                     var keysym: x11.KeySym = undefined;
                     _ = x11.XLookupString(&event.xkey, null, 0, &keysym, null);
-                    return .{ .release = .{ .key = toKey(keysym), .mod = toMod(event.xkey.state) } };
+                    const key = KeyInput{ .key = toKey(keysym), .mod = toMod(event.xkey.state) };
+                    try self._key_state.put(key, false);
                 },
                 x11.FocusOut => {
                     _ = x11.XAutoRepeatOn(self._display);
@@ -247,6 +264,7 @@ const X11Input = struct {
     }
 
     pub fn deinit(self: *X11Input) !void {
+        self._key_state.deinit();
         _ = x11.XAutoRepeatOn(self._display);
         _ = x11.XCloseDisplay(self._display);
     }
@@ -254,17 +272,37 @@ const X11Input = struct {
 
 const StdInput = struct {
     stdin: std.fs.File.Reader,
+    _key_state: std.AutoHashMap(KeyInput, i128),
 
-    pub fn init() StdInput {
+    pub fn init(allocator: std.mem.Allocator) StdInput {
         return .{
             .stdin = std.io.getStdIn().reader(),
+            ._key_state = std.AutoHashMap(KeyInput, i128).init(allocator),
         };
     }
 
-    pub fn nextEvent(self: *StdInput) !?KeyEvent {
+    pub fn deinit(self: *StdInput) void {
+        self._key_state.deinit();
+    }
+
+    pub fn contains(self: *StdInput, key: *const KeyInput) !bool {
+        _ = try self.nextEvent();
+        if (self._key_state.get(key.*)) |k| {
+            if ((std.time.nanoTimestamp() - k) <= 500000000) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn nextEvent(self: *StdInput) !?KeyInput {
         var buf: [3]u8 = undefined;
         const c = try self.stdin.read(&buf);
-        return .{ .press = try toKeyInput(buf[0..c]) orelse return null };
+        const key = try toKeyInput(buf[0..c]) orelse null;
+        if (key) |ev| {
+            try self._key_state.put(ev, std.time.nanoTimestamp());
+        }
+        return key;
     }
 
     fn toKeyInput(buf: []const u8) !?KeyInput {
@@ -364,36 +402,36 @@ const StdInput = struct {
 };
 
 // deprecated and overkilled previous idea
-const libudev = @cImport(@cInclude("libudev.h"));
-fn findKeyboard() ?[]const u8 {
-    var devnode: [*c]const u8 = undefined;
-    var udev: *libudev.udev = undefined;
-    var enumerate: *libudev.udev_enumerate = undefined;
-    var devices: *libudev.udev_list_entry = undefined;
-    var dev: *libudev.udev_device = undefined;
-
-    if (libudev.udev_new()) |ud| udev = ud;
-    if (libudev.udev_enumerate_new(udev)) |en| enumerate = en;
-    _ = libudev.udev_enumerate_add_match_property(enumerate, "ID_INPUT_KEYBOARD", "1");
-    _ = libudev.udev_enumerate_scan_devices(enumerate);
-    if (libudev.udev_enumerate_get_list_entry(enumerate)) |devi| devices = devi;
-
-    var entry: ?*libudev.udev_list_entry = devices;
-    while (entry != null) {
-        var path: [*c]const u8 = undefined;
-        path = libudev.udev_list_entry_get_name(entry);
-        if (libudev.udev_device_new_from_syspath(udev, path)) |de| dev = de;
-        devnode = libudev.udev_device_get_devnode(dev);
-        if (devnode != null) {
-            break;
-        }
-        _ = libudev.udev_device_unref(dev);
-        entry = libudev.udev_list_entry_get_next(entry);
-    }
-
-    _ = libudev.udev_enumerate_unref(enumerate);
-    _ = libudev.udev_unref(udev);
-
-    if (devnode == null) return null;
-    return std.mem.span(devnode);
-}
+// const libudev = @cImport(@cInclude("libudev.h"));
+// fn findKeyboard() ?[]const u8 {
+//     var devnode: [*c]const u8 = undefined;
+//     var udev: *libudev.udev = undefined;
+//     var enumerate: *libudev.udev_enumerate = undefined;
+//     var devices: *libudev.udev_list_entry = undefined;
+//     var dev: *libudev.udev_device = undefined;
+//
+//     if (libudev.udev_new()) |ud| udev = ud;
+//     if (libudev.udev_enumerate_new(udev)) |en| enumerate = en;
+//     _ = libudev.udev_enumerate_add_match_property(enumerate, "ID_INPUT_KEYBOARD", "1");
+//     _ = libudev.udev_enumerate_scan_devices(enumerate);
+//     if (libudev.udev_enumerate_get_list_entry(enumerate)) |devi| devices = devi;
+//
+//     var entry: ?*libudev.udev_list_entry = devices;
+//     while (entry != null) {
+//         var path: [*c]const u8 = undefined;
+//         path = libudev.udev_list_entry_get_name(entry);
+//         if (libudev.udev_device_new_from_syspath(udev, path)) |de| dev = de;
+//         devnode = libudev.udev_device_get_devnode(dev);
+//         if (devnode != null) {
+//             break;
+//         }
+//         _ = libudev.udev_device_unref(dev);
+//         entry = libudev.udev_list_entry_get_next(entry);
+//     }
+//
+//     _ = libudev.udev_enumerate_unref(enumerate);
+//     _ = libudev.udev_unref(udev);
+//
+//     if (devnode == null) return null;
+//     return std.mem.span(devnode);
+// }

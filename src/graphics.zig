@@ -190,9 +190,7 @@ pub fn drawText(screen: *Screen, content: []const u8, pos: *const Vec2, style: *
 }
 
 pub fn drawParticles(screen: *Screen, position: *const Vec2, width: f32, height: f32, quantity: usize, style: *const Cell) void {
-    var rn: [1]u8 = undefined;
-    std.posix.getrandom(&rn) catch unreachable;
-    var rng = std.rand.DefaultPrng.init(@intCast(rn[0]));
+    var rng = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     var prng = rng.random();
 
     for (0..quantity) |_| {
@@ -221,7 +219,7 @@ const Sprite = struct {
         var style_cell = Cell{ .char = 0, .style = style.* };
 
         for (self.image) |c| {
-            if (c != ' ' or c != '\n') {
+            if (c != ' ' and c != '\n') {
                 style_cell.char = @intCast(c);
                 screen.writeCellF(position.x() + x, position.y() + y, &style_cell);
             }

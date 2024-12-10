@@ -17,7 +17,7 @@ pub fn main() !void {
     defer term.deinit() catch |err| @panic(@errorName(err));
     errdefer term.deinit() catch |err| @panic(@errorName(err));
 
-    var input = try Input.init();
+    var input = try Input.init(gpa.allocator());
     defer input.deinit() catch |err| @panic(@errorName(err));
     errdefer input.deinit() catch |err| @panic(@errorName(err));
 
@@ -28,7 +28,6 @@ pub fn main() !void {
     var text_speed = vec2(1, 1);
     var view_pos = vec2(0, 0);
     var view_direction: f32 = 1;
-    var view_is_moving = false;
     const max_jump: f32 = 0;
     var is_falling = false;
     var start_jump = false;
@@ -61,21 +60,16 @@ pub fn main() !void {
         while (!text_entered) {
             text_area.draw(&term.screen);
             try term.draw();
-            if (input.nextEvent()) |event| {
-                switch (event) {
-                    .press => |*kinput| {
-                        switch (kinput.key) {
-                            .enter => {
-                                const buffer = text_area.buffer();
-                                name_len = buffer.len;
-                                @memcpy(name[0..name_len], buffer);
-                                text_entered = true;
-                            },
-                            .escape => return,
-                            else => try text_area.input(kinput),
-                        }
+            if (input.nextEvent()) |key| {
+                switch (key.key) {
+                    .enter => {
+                        const buffer = text_area.buffer();
+                        name_len = buffer.len;
+                        @memcpy(name[0..name_len], buffer);
+                        text_entered = true;
                     },
-                    else => {},
+                    .escape => return,
+                    else => try text_area.input(&key),
                 }
             }
         }
@@ -166,34 +160,19 @@ pub fn main() !void {
 
         try term.draw();
 
-        if (input.nextEvent()) |event| {
-            switch (event) {
-                .press => |*kinput| {
-                    switch (kinput.key) {
-                        .space => start_jump = true,
-                        .d => {
-                            view_direction = 1;
-                            view_is_moving = true;
-                        },
-                        .a => {
-                            view_direction = -1;
-                            view_is_moving = true;
-                        },
-                        .escape => break,
-                        else => {},
-                    }
-                },
-                .release => |*kinput| {
-                    switch (kinput.key) {
-                        .d => view_is_moving = false,
-                        .a => view_is_moving = false,
-                        else => {},
-                    }
-                },
-            }
-        }
-        if (view_is_moving) {
+        if (input.contains(&.{ .key = .d })) {
+            view_direction = 1;
             view_pos = view_pos.add(&vec2(1 * view_direction, 0));
+        }
+        if (input.contains(&.{ .key = .a })) {
+            view_direction = -1;
+            view_pos = view_pos.add(&vec2(1 * view_direction, 0));
+        }
+        if (input.contains(&.{ .key = .space })) {
+            start_jump = true;
+        }
+        if (input.contains(&.{ .key = .escape })) {
+            break;
         }
     }
 }
